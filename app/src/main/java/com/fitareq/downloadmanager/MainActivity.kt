@@ -77,10 +77,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun callDownload() {
+        binding.download.isEnabled = false
         downloadFile { progress ->
             runOnUiThread {
-                if (progress == 100) binding.progress.text = "Download completed"
-                else binding.progress.text = "$progress%"
+
+                if (progress == 100) {
+                    binding.progress.text = "Download completed"
+                    binding.download.isEnabled = true
+                }
+                else binding.progress.text = "Downloading... \n$progress% completed."
             }
 
         }
