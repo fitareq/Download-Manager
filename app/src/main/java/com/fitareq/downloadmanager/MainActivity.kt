@@ -4,63 +4,64 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.database.Cursor
 import android.net.Uri
+import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.os.Environment
+import android.os.IBinder
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.fitareq.downloadmanager.databinding.ActivityMainBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
+    private val downloadUrl =
+        "https://www.dropbox.com/scl/fi/h33z5i2w2o1zwgckll90u/sample-30s.mp4?rlkey=dr53zsy0j1ebasceifbu3ifth&dl=1"
 
-    private val downloadReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val action = intent?.action
-            if (DownloadManager.ACTION_DOWNLOAD_COMPLETE == action) {
-                // Download completed
-                val downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-                checkDownloadStatus(downloadId)
-            }
-        }
-    }
     private lateinit var binding: ActivityMainBinding
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
         binding.download.setOnClickListener {
-            checkPermissionsAndDownload()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                callDownload()
+            else checkPermissionAndDownload()
         }
 
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
 
-        // Unregister the download receiver
-        unregisterReceiver(downloadReceiver)
-    }
-
-    private fun checkPermissionsAndDownload() {
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            startDownload()
-        } else {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-                REQUEST_WRITE_EXTERNAL_STORAGE
-            )
+    private val STORAGE_PERMISSION = 1002
+    private fun checkPermissionAndDownload() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            callDownload()
+        else {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                callDownload()
+            } else {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                    STORAGE_PERMISSION
+                )
+            }
         }
     }
 
@@ -70,68 +71,78 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_WRITE_EXTERNAL_STORAGE) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startDownload()
-            }
+        if (requestCode == STORAGE_PERMISSION && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            callDownload()
         }
     }
 
-    private fun startDownload() {
-        val downloadUrl =
-            "https://www.dropbox.com/scl/fi/h33z5i2w2o1zwgckll90u/sample-30s.mp4?dl=0&rlkey=dr53zsy0j1ebasceifbu3ifth"
+    private fun callDownload() {
+        downloadFile { progress ->
+            runOnUiThread {
+                if (progress == 100) binding.progress.text = "Download completed"
+                else binding.progress.text = "$progress%"
+            }
+
+        }
+    }
+
+    var downloadID: Long = 0L
+
+    @SuppressLint("Range")
+    private fun downloadFile(callBack: (Int) -> Unit) {
         val fileName = "sample_file.mp4"
 
         val request = DownloadManager.Request(Uri.parse(downloadUrl))
             .setTitle(fileName)
             .setDescription("Downloading")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            .setAllowedOverMetered(true)
 
-        val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val downloadId = downloadManager.enqueue(request)
-        checkDownloadStatus(downloadId)
+        val downloadManager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+        downloadID = downloadManager.enqueue(request)
 
-    }
 
-    @SuppressLint("Range")
-    private fun checkDownloadStatus(downloadId: Long) {
-        val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val query = DownloadManager.Query().setFilterById(downloadId)
-        val cursor = downloadManager.query(query)
+        GlobalScope.launch(Dispatchers.IO) {
+            var progress = 0
+            var isDownloadFinished = false
+            while (!isDownloadFinished) {
+                val cursor: Cursor =
+                    downloadManager.query(DownloadManager.Query().setFilterById(downloadID))
+                if (cursor.moveToFirst()) {
+                    val downloadStatus =
+                        cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS))
+                    when (downloadStatus) {
+                        DownloadManager.STATUS_RUNNING -> {
+                            val totalBytes =
+                                cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                            if (totalBytes > 0) {
+                                val downloadedBytes =
+                                    cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                                progress = (downloadedBytes * 100 / totalBytes).toInt()
+                            }
+                        }
 
-        if (cursor.moveToFirst()) {
-            when (cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS))) {
-                DownloadManager.STATUS_SUCCESSFUL -> {
-                    // Download successful
+                        DownloadManager.STATUS_SUCCESSFUL -> {
+                            progress = 100
+                            isDownloadFinished = true
+                        }
+
+                        DownloadManager.STATUS_PAUSED, DownloadManager.STATUS_PENDING -> {
+                            // Do nothing for paused or pending states
+                        }
+
+                        DownloadManager.STATUS_FAILED -> {
+                            isDownloadFinished = true
+                        }
+                    }
+                    //mainHandler.sendMessage(message)
+                    callBack(progress)
                 }
-
-                DownloadManager.STATUS_FAILED -> {
-                    // Download failed
-                }
-
-                DownloadManager.STATUS_PAUSED -> {
-                    // Download paused
-                }
-
-                DownloadManager.STATUS_PENDING -> {
-                    // Download pending
-                }
-
-                DownloadManager.STATUS_RUNNING -> {
-                    // Download in progress
-                    val downloadedBytes =
-                        cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
-                    val totalBytes =
-                        cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
-                    val progress = (downloadedBytes * 100 / totalBytes).toInt()
-                    binding.progress.text = "$progress downloading of $totalBytes"
-                    // Update UI with progress
-                }
+                cursor.close()
             }
+
+
         }
-    }
-    companion object {
-        const val REQUEST_WRITE_EXTERNAL_STORAGE = 1
     }
 }
